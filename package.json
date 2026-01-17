@@ -1,0 +1,12 @@
+{
+  "name": "plank-challenge",
+  "version": "1.0.0",
+  "description": "30-Day Plank Challenge Timer",
+  "scripts": {
+    "dev": "npx serve .",
+    "start": "npx serve ."
+  },
+  "keywords": ["plank", "fitness", "challenge", "timer"],
+  "author": "",
+  "license": "ISC"
+}
