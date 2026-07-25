@@ -262,6 +262,64 @@
       background: rgba(233, 69, 96, 0.2);
       border: 1px solid #e94560;
       color: #e94560;
+      padding: 10px 22px;
+      font-size: 0.75rem;
+    }
+
+    .reset-row {
+      text-align: center;
+    }
+
+    .overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 1000;
+      padding: 20px;
+    }
+
+    .overlay.active {
+      display: flex;
+    }
+
+    .overlay-card {
+      background: #16213e;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      padding: 30px 25px;
+      width: 100%;
+      max-width: 340px;
+      text-align: center;
+      animation: bounceIn 0.4s ease;
+    }
+
+    .overlay-card h2 {
+      font-size: 1.3rem;
+      margin-bottom: 15px;
+    }
+
+    .overlay-card p {
+      color: #8892b0;
+      font-size: 0.95rem;
+      line-height: 1.5;
+      margin-bottom: 25px;
+    }
+
+    .overlay-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .overlay-actions .btn {
+      width: 100%;
+      min-width: 0;
     }
 
     .current-day-display {
@@ -308,6 +366,10 @@
     </div>
 
     <p class="tip">Tip: Long-press any day to set a custom time</p>
+
+    <div class="reset-row">
+      <button class="btn reset-btn" id="startOverBtn">Start Over</button>
+    </div>
   </div>
 
   <div class="celebration" id="celebration">
@@ -315,6 +377,28 @@
       <div class="celebration-emoji">🎉</div>
       <div class="celebration-text">Day Complete!</div>
       <button class="btn btn-primary" id="celebrationClose">Continue</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="welcomeBack">
+    <div class="overlay-card">
+      <h2>Welcome back</h2>
+      <p id="welcomeBackText"></p>
+      <div class="overlay-actions">
+        <button class="btn btn-primary" id="restartBtn">Start Over at Day 1</button>
+        <button class="btn btn-secondary" id="resumeBtn">Pick up where I left off</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="confirmReset">
+    <div class="overlay-card">
+      <h2>Start over?</h2>
+      <p>This clears all 30 days and puts you back at Day 1 with a 0:30 hold. Any custom times you set are kept.</p>
+      <div class="overlay-actions">
+        <button class="btn btn-primary" id="confirmResetYes">Yes, start over</button>
+        <button class="btn btn-secondary" id="confirmResetNo">Cancel</button>
+      </div>
     </div>
   </div>
 
@@ -329,6 +413,9 @@
       180, 200, 210, 225, 240       // Days 26-30
     ];
 
+    // Days away from the challenge before we offer a restart
+    const LAPSE_DAYS = 14;
+
     let currentDay = 1;
     let completedDays = new Set();
     let timeRemaining = 0;
@@ -336,6 +423,8 @@
     let timerInterval = null;
     let customTimes = {};
     let longPressTimer = null;
+    let lastCompletedAt = null;
+    let lapseAckFor = null;
 
     // DOM Elements
     const timerDisplay = document.getElementById('timerDisplay');
@@ -350,6 +439,14 @@
     const celebrationClose = document.getElementById('celebrationClose');
     const currentDayNumber = document.getElementById('currentDayNumber');
     const currentDayTime = document.getElementById('currentDayTime');
+    const welcomeBack = document.getElementById('welcomeBack');
+    const welcomeBackText = document.getElementById('welcomeBackText');
+    const restartBtn = document.getElementById('restartBtn');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const startOverBtn = document.getElementById('startOverBtn');
+    const confirmReset = document.getElementById('confirmReset');
+    const confirmResetYes = document.getElementById('confirmResetYes');
+    const confirmResetNo = document.getElementById('confirmResetNo');
 
     // Audio context for beep
     let audioContext = null;
@@ -408,6 +505,12 @@
           completedDays = new Set(data.completedDays || []);
           currentDay = data.currentDay || 1;
           customTimes = data.customTimes || {};
+          lapseAckFor = data.lapseAckFor || null;
+
+          // Older saves only had lastSaved, which tracks the last time the app
+          // was opened. That is always at or after the real last workout, so
+          // seeding from it can only under-report a lapse, never invent one.
+          lastCompletedAt = data.lastCompletedAt || data.lastSaved || null;
 
           // Validate currentDay
           if (currentDay < 1) currentDay = 1;
@@ -418,6 +521,8 @@
         completedDays = new Set();
         currentDay = 1;
         customTimes = {};
+        lastCompletedAt = null;
+        lapseAckFor = null;
       }
     }
 
@@ -427,6 +532,8 @@
           completedDays: Array.from(completedDays),
           currentDay: currentDay,
           customTimes: customTimes,
+          lastCompletedAt: lastCompletedAt,
+          lapseAckFor: lapseAckFor,
           lastSaved: new Date().toISOString()
         };
         localStorage.setItem('plankChallenge', JSON.stringify(data));
@@ -554,6 +661,8 @@
 
     function markComplete() {
       completedDays.add(currentDay);
+      lastCompletedAt = new Date().toISOString();
+      lapseAckFor = null;
 
       // Auto-advance to next incomplete day
       let nextDay = currentDay + 1;
@@ -577,6 +686,51 @@
       celebration.classList.remove('active');
     }
 
+    function daysSince(isoString) {
+      if (!isoString) return null;
+      const then = new Date(isoString).getTime();
+      if (isNaN(then)) return null;
+      return Math.floor((Date.now() - then) / 86400000);
+    }
+
+    function checkForLapse() {
+      if (completedDays.size === 0) return;
+      if (!lastCompletedAt || lapseAckFor === lastCompletedAt) return;
+
+      const away = daysSince(lastCompletedAt);
+      if (away === null || away < LAPSE_DAYS) return;
+
+      if (completedDays.size === 30) {
+        welcomeBackText.innerHTML = `It's been ${away} days since you finished the challenge.<br>Ready to run it again?`;
+        resumeBtn.textContent = 'Not right now';
+      } else {
+        const lastDone = Math.max(...Array.from(completedDays));
+        const target = formatTime(getTimeForDay(currentDay));
+        welcomeBackText.innerHTML = `It's been ${away} days since you finished Day ${lastDone}.<br>Picking up at Day ${currentDay} means a ${target} hold.`;
+        resumeBtn.textContent = `Pick up at Day ${currentDay}`;
+      }
+
+      welcomeBack.classList.add('active');
+    }
+
+    function dismissLapse() {
+      lapseAckFor = lastCompletedAt;
+      saveProgress();
+      welcomeBack.classList.remove('active');
+    }
+
+    function startOver() {
+      completedDays = new Set();
+      currentDay = 1;
+      lastCompletedAt = null;
+      lapseAckFor = null;
+      saveProgress();
+      welcomeBack.classList.remove('active');
+      confirmReset.classList.remove('active');
+      updateDisplay();
+      resetTimer();
+    }
+
     function checkAllComplete() {
       if (completedDays.size === 30) {
         return true;
@@ -593,9 +747,19 @@
       if (e.target === celebration) closeCelebration();
     });
 
+    restartBtn.addEventListener('click', startOver);
+    resumeBtn.addEventListener('click', dismissLapse);
+    startOverBtn.addEventListener('click', () => confirmReset.classList.add('active'));
+    confirmResetYes.addEventListener('click', startOver);
+    confirmResetNo.addEventListener('click', () => confirmReset.classList.remove('active'));
+    confirmReset.addEventListener('click', (e) => {
+      if (e.target === confirmReset) confirmReset.classList.remove('active');
+    });
+
     // Initialize
     loadProgress();
     updateDisplay();
+    checkForLapse();
 
     // Log current state for debugging
     console.log('Plank Challenge loaded');
